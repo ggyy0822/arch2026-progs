@@ -20,9 +20,18 @@ target_search:
     mv s5, a1
     mv s6, a2
     la s7, search_frames
-    # AI refinement: t3/t4 remain live across leaf helpers.
+    mv a0, s4
+    mv a1, s5
+    call hard11_lookup
     la t3, rt_pd
     la t4, rt_od
+    beq a0, zero, .Lcompute_initial_bound
+    li s2, 11
+    j start_bound
+.Lcompute_initial_bound:
+    # The membership lookup used a0/a1, so restore both coordinates.
+    mv a0, s4
+    mv a1, s5
     mv a2, t3
     mv a3, t4
     call heuristic

@@ -14,31 +14,33 @@ near_lookup:
     sub     t0, t0, t1
     add     t0, t0, a0
     add     t0, t0, a1     # p*729+o
-    li      t1, 0          # lower index inclusive
-    li      t2, 12224      # upper index exclusive
+    srli    t1, t0, 16    # high-byte bucket
+    slli    t1, t1, 1
+    la      t3, near_bucket
+    add     t3, t3, t1
+    lhu     t1, 0(t3)     # lower index inclusive
+    lhu     t2, 2(t3)     # upper index exclusive
+    slli    t0, t0, 16
+    srli    t0, t0, 16    # low 16 bits of key
     la      t3, near_table
 .Lnear_loop:
     bgeu    t1, t2, .Lnear_miss
     add     t4, t1, t2
     srli    t4, t4, 1
-    slli    t5, t4, 1
-    add     t5, t5, t4
-    slli    t5, t5, 1      # six bytes per entry
+    slli    t5, t4, 2
+    add     t5, t5, t4     # five bytes per entry
     add     t5, t5, t3
     lbu     t6, 0(t5)
     lbu     a2, 1(t5)
     slli    a2, a2, 8
     or      t6, t6, a2
-    lbu     a2, 2(t5)
-    slli    a2, a2, 16
-    or      t6, t6, a2
     bltu    t6, t0, .Lnear_right
     bltu    t0, t6, .Lnear_left
-    lbu     a0, 3(t5)
-    lbu     a2, 4(t5)
+    lbu     a0, 2(t5)
+    lbu     a2, 3(t5)
     slli    a2, a2, 8
     or      a0, a0, a2
-    lbu     a2, 5(t5)
+    lbu     a2, 4(t5)
     slli    a2, a2, 16
     or      a0, a0, a2
     ret
