@@ -5,7 +5,7 @@ This note covers my fork of [arch2026-progs](https://github.com/ggyy0822/arch202
 ## Environment and measurement method
 
 - Toolchain: GNU RISC-V GCC 16.1.0, `-march=rv32i_zicsr -mabi=ilp32 -ffreestanding`; C built at `-O1`, `-O2`, `-O3`, and `-Os`. My local `riscv32-unknown-elf-` prefix wraps the installed `riscv64-unknown-elf-` cross tools in RV32 mode.
-- Emulator: rv32emu system interpreter, commit `ffb041bab9d1513e5329f25f486378778dceed13`, with ELF loader and M/A/F/C extensions disabled.
+- Emulator: rv32emu system interpreter, commit `9dbff65c4d6a40d64d3bbb38f4c5a20d6e885e24`, with ELF loader and M/A/F/C extensions disabled.
 - `make cycles` measures repeated calls on identical inputs. It subtracts an empty-loop baseline, including loop control, input load, and counter reads. Initialization and printing are outside the measured region. The same ELF contains both the C and assembly functions.
 - rv32emu does not model pipeline timing: its `cycle` and `instret` counters both count executed guest instructions. These numbers show instruction work, not real processor latency or cache behavior. `common/perf.S` reads each 64-bit counter with a high–low–high retry to handle rollover.
 
@@ -119,7 +119,7 @@ The table reports counted cycles per call on the benchmark inputs. Lower is bett
 | gcd.gcd | 101.6 | 116.5 | 118.9 | 119.6 | 101.6 | 101.6 | 1.00x |
 | rubik.solve | 252291.5 | 202697.5 | 201755.7 | 204453.7 | 50644.2 | 201755.7 | 3.98x |
 
-Assembly wins most clearly for Rubik, BF16 multiplication and square root, and fixed-point multiplication. It matches C for GCD and `fixed.op2/op3`. For `bf16.from_f32` and `fixed.op1`, the compiler is slightly better; the assembly still passes the automated tolerance against `-O2`, but I do not claim a speed win over the best C build for those functions. The Rubik assembly uses more static data than C to reduce target-side search work. This is a deliberate memory-for-instructions tradeoff.
+Assembly wins most clearly for Rubik, BF16 multiplication and square root, and fixed-point multiplication. It matches C for GCD and `fixed.op2/op3`. For `bf16.from_f32` and `fixed.op1`, the compiler is slightly better; the current grader still passes these programs. Its performance gate compares each call with the fastest of `-O1`, `-O2`, `-O3`, and `-Os`, allowing at most two extra counted instructions; the table shows averages over benchmark calls and is not itself that per-call gate. I do not claim a speed win for these functions. The Rubik assembly uses more static data than C to reduce target-side search work. This is a deliberate memory-for-instructions tradeoff.
 
 ## Code and data footprint
 
@@ -172,3 +172,28 @@ python3 tools/check_rubik_hard11.py --prefix riscv32-unknown-elf-
 ```
 
 The cycle and footprint tables are written to the ignored `results/` directory. The full Rubik check requires the O2 ELF objects built by `make test`. The one-time local Lab 2 playground exercise and the English CodeTrial mock interview are separate from this code report; they are not represented by the automated 100/100 score.
+
+## Disassembly and measured optimization evidence
+
+I generated the ELF listings with `make dump` and inspected `build/<program>/O2/<program>.dis` beside `build/<program>/asm.dis`. These files are generated locally and ignored by Git; the linked source files above are pinned to a commit. The comparisons below use the same `make cycles` benchmark inputs and measured region. They are controlled **C `-O2` to handwritten-assembly replacements**, not a claim that every internal edit was separately timed. The earlier three-row Rubik table is the recorded sequence of assembly revisions for one hard state.
+
+| Program and measured replacement | Before: C `-O2` | After: assembly | Difference | Main reason and cost |
+|---|---:|---:|---:|---|
+| Rubik `rubik_solve` | 202,697.5 | 50,644.2 | 75.0% fewer | Exact distance-≤5 endgame lookup and compact distance-11 membership avoid repeated search; read-only data rises from 40,507 to 109,615 bytes. These are benchmark averages, not the worst-case budget result. |
+| BF16 `from_f32` | 12.1 | 12.2 | 0.8% more | Both versions use the `0x7fff` plus tie-bit formula; the handwritten exponent test adds work on these inputs. Best C is `-O1` at 11.1. |
+| BF16 `mul` | 79.1 | 66.6 | 15.8% fewer | The 8-bit mantissa multiply stays in registers; the handwritten shift-and-add loop uses one conditional add per set bit. Special-case branches remain necessary. |
+| BF16 `sqrt` | 294.9 | 251.2 | 14.8% fewer | Binary-search bounds and the software square remain in registers, with fewer loop instructions than GCC `-O2`. Each candidate still costs a shift-and-add square. |
+| GCD `gcd_u32` | 116.5 | 101.6 | 12.8% fewer | The handwritten odd-part loop has a simpler branch layout. Both versions are stack-free; `-O1` C also reaches 101.6, so this is not a win over the best C build. |
+| Fixed `op1` | 21.9 | 22.1 | 0.9% more | The carry loop is already efficient in GCC. The different branch/register arrangement loses slightly on the measured inputs. |
+| Fixed `op2` and `op3` | 4.0 / 7.0 | 4.0 / 7.0 | equal | GCC already emits the direct RV32I `sub` and the four-operation average formula; there is no useful call or stack traffic to remove. |
+| Fixed `q_mul` | 319.8 | 224.6 | 29.8% fewer | GCC `-O2` uses a 32-byte stack frame and four `__mulsi3` calls for 16-bit partial products. The handwritten version forms a signed 64-bit register-pair product with shifts, conditional adds and carry propagation. Its variable-length loop makes input-dependent cost a tradeoff. |
+
+The disassembly explains why the improvements differ. In `fixed/O2/fixed.dis`, `q_mul` begins with `addi sp,sp,-32`, saves registers with `sw`, and has four `jal ra,__mulsi3` calls. In `fixed/asm.dis`, `q_mul_asm` tests one multiplier bit with `andi`, conditionally adds to the register pair using `add` and `sltu` for carry, then shifts with `srli`/`slli`; it neither saves a stack frame nor calls a helper. In `gcd/O2/gcd.dis`, the compiler already uses only shifts, subtraction and branches, so the assembly advantage is smaller and disappears against C `-O1`. In `bf16/O2/bf16.dis`, GCC already inlines the shift-and-add multiplication; the handwritten gain comes from its loop and register layout, **not** from removing a multiplication library call. In `rubik/O2/rubik.dis`, the C entry uses a 192-byte stack frame; the assembly entry uses 80 bytes and the search routine another 48, plus 384 bytes of static frames. The main Rubik gain is the lookup and search bound, not stack traffic alone.
+
+Program-level `.text` is reported in the footprint table above. Assembly is smaller than C `-O2` for BF16 (620 versus 700 bytes), GCD (132 versus 140), and fixed (192 versus 344). Rubik assembly is larger (1,648 versus 1,192), and its total static footprint remains below 128 KiB. GCD assembly is also larger than the best-size C `-Os` build (132 versus 120). These costs are part of the measured tradeoffs rather than hidden exceptions.
+
+## Current grading reproduction and limits
+
+On 2026-11-15 I ran `make update`, then `make grade`, `make cycles`, and `make size`. The instructor repository's `main` was `fd2d7c17db223807c342e3f210c769d23d1865b1`; the updated rv32emu was `9dbff65c4d6a40d64d3bbb38f4c5a20d6e885e24`. Local `make grade` returned **100.0/100** with all four programs passing. The clean `scripts/grade.sh --submission . --chain` check verified the eleven-commit Change-Id chain and passed sanitizers and grading at all four optimization levels, also scoring **100.0/100**.
+
+There is one local compiler caveat. GNU RISC-V GCC 16.1.0 warns that `spin` is set but not read in the instructor's `tests/trt.c`; the clean build treats warnings as errors. For that clean run only, I added `-Wno-unused-but-set-variable` to the compile flags through the environment. I did not edit the instructor harness or any implementation source. The ordinary local `make grade` passed without this override using its previously built harness object. The CI toolchain can differ, so the pushed GitHub Actions grade remains a separate check. The `cycle` figures are guest-instruction counts in this interpreter, not hardware cycle latency. The plotted charts were skipped because `matplotlib` is not installed; the CSV and Markdown tables were generated.
